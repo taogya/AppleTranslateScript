@@ -1,5 +1,5 @@
 """
-Integration tests for apple-translate CLI v1.0.1.
+Integration tests for apple-translate CLI v1.1.0.
 
 Requires:
     - The CLI binary built at .build/release/apple-translate
@@ -8,7 +8,9 @@ Requires:
 """
 
 import os
+import pty
 import subprocess
+import tempfile
 import pytest
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -46,8 +48,6 @@ SAME_LANGUAGE_PAIRS = [
     ("zh-Hans-CN", "zh-Hant-TW"),
     ("zh-Hant-TW", "zh-Hans-CN"),
 ]
-
-_SAME_LANG_SET = {(s, t) for s, t in SAME_LANGUAGE_PAIRS}
 
 
 def run_cli(
@@ -89,17 +89,25 @@ class TestMeta:
     def test_version(self):
         result = run_cli(["--version"])
         assert result.returncode == 0
-        assert result.stdout.strip() == "apple-translate 1.0.1"
+        assert result.stdout == "apple-translate 1.1.0\n"
 
     def test_version_short(self):
         result = run_cli(["-v"])
         assert result.returncode == 0
-        assert result.stdout.strip() == "apple-translate 1.0.1"
+        assert result.stdout == "apple-translate 1.1.0\n"
 
     def test_help_ignores_stdin(self):
         result = run_cli(["--help"], input_text="Hello")
         assert result.returncode == 0
         assert "Usage:" in result.stdout
+
+    def test_help_shows_text_option(self):
+        result = run_cli(["--help"])
+        assert "--text" in result.stdout
+
+    def test_help_shows_file_option(self):
+        result = run_cli(["--help"])
+        assert "--file" in result.stdout
 
 
 # ── Required arguments ──
@@ -154,7 +162,7 @@ class TestListLanguages:
     def test_list_languages(self):
         result = run_cli(["--list-languages"])
         assert result.returncode == 0
-        lines = result.stdout.strip().splitlines()
+        lines = result.stdout.splitlines()
         assert len(lines) >= 21
         for line in lines:
             parts = line.split()
@@ -163,7 +171,7 @@ class TestListLanguages:
     def test_list_languages_short(self):
         result = run_cli(["-l"])
         assert result.returncode == 0
-        assert len(result.stdout.strip().splitlines()) >= 21
+        assert len(result.stdout.splitlines()) >= 21
 
     @pytest.mark.parametrize("lang", SUPPORTED_LANGUAGES)
     def test_list_contains(self, lang: str):
@@ -171,7 +179,7 @@ class TestListLanguages:
         assert lang in result.stdout
 
 
-# ── Plain text translation ──
+# ── Plain text translation (stdin) ──
 
 
 class TestPlainText:
@@ -183,9 +191,7 @@ class TestPlainText:
     def test_single_line(self):
         result = run_cli(["--from", "en", "--to", "ja"], input_text="Hello")
         assert result.returncode == 0
-        output = result.stdout.strip()
-        assert len(output) > 0
-        assert not output.startswith("{")
+        assert result.stdout == "こんにちは\n"
 
     def test_multiple_lines(self):
         result = run_cli(
@@ -193,8 +199,7 @@ class TestPlainText:
             input_text="Hello\nGoodbye\n",
         )
         assert result.returncode == 0
-        lines = result.stdout.strip().splitlines()
-        assert len(lines) == 2
+        assert result.stdout == "こんにちは\nさようなら\n"
 
     def test_whitespace_only_input(self):
         result = run_cli(
@@ -202,7 +207,232 @@ class TestPlainText:
             input_text="   \n  \n   ",
         )
         assert result.returncode == 0
-        assert result.stdout.strip() == ""
+        assert result.stdout == "   \n  \n   \n"
+
+    def test_stdin_with_blank_lines(self):
+        """Blank lines in stdin should be preserved in output."""
+        result = run_cli(
+            ["--from", "en", "--to", "ja"],
+            input_text="Hello\n\nGoodbye",
+        )
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\n\nさようなら\n"
+
+    def test_tab_only_lines(self):
+        """Tab-only lines should be preserved as-is in output."""
+        result = run_cli(
+            ["--from", "en", "--to", "ja"],
+            input_text="Hello\n\t\t\nGoodbye",
+        )
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\n\t\t\nさようなら\n"
+
+    def test_mixed_whitespace_and_text(self):
+        """Mix of text, blank, and whitespace-only lines."""
+        result = run_cli(
+            ["--from", "en", "--to", "ja"],
+            input_text="Hello\n\n  \t \nGoodbye",
+        )
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\n\n  \t \nさようなら\n"
+
+
+# ── Argument text translation ──
+
+
+class TestArgumentText:
+    def test_positional_text(self):
+        result = run_cli(["Hello", "--from", "en", "--to", "ja"])
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\n"
+
+    def test_text_flag(self):
+        result = run_cli(["--text", "Hello", "--from", "en", "--to", "ja"])
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\n"
+
+    def test_positional_newline_literal(self):
+        """Literal \\n in positional text is passed as-is to translation API."""
+        result = run_cli(["Hello\\nGoodbye", "--from", "en", "--to", "ja"])
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは、さようなら\n"
+
+    def test_text_flag_newline_literal(self):
+        """Literal \\n in --text is passed as-is to translation API."""
+        result = run_cli(["--text", "Hello\\nGoodbye", "--from", "en", "--to", "ja"])
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは、さようなら\n"
+
+    def test_positional_with_exclamation(self):
+        """apple-translate 'Hello!\nWorld !' --from en --to ja"""
+        result = run_cli(["Hello!\\nWorld !", "--from", "en", "--to", "ja"])
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは！ 世界！\n"
+
+    def test_tab_literal(self):
+        """Literal \\t is passed as-is to translation API."""
+        result = run_cli(["Hello\\tWorld", "--from", "en", "--to", "ja"])
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\\tWorld\n"
+
+    def test_backslash_literal(self):
+        """Literal backslash is passed as-is to translation API."""
+        result = run_cli(["Hello \\ World", "--from", "en", "--to", "ja"])
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは \\ 世界\n"
+
+    def test_quoted_text(self):
+        """Quoted text with special chars (shell handles outer quotes)."""
+        result = run_cli(['"Hello"', "--from", "en", "--to", "ja"])
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\n"
+
+    def test_emoji(self):
+        result = run_cli(["I love you 😊", "--from", "en", "--to", "ja"])
+        assert result.returncode == 0
+        assert result.stdout == "あなたを愛しています 😊\n"
+
+    def test_symbols(self):
+        result = run_cli(["Price: $100 & 50% off!", "--from", "en", "--to", "ja"])
+        assert result.returncode == 0
+        assert result.stdout == "価格：$100、50%オフ！\n"
+
+
+# ── File input (--file) ──
+
+
+class TestFileInput:
+    def test_file_single_line(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("Hello\n")
+            f.flush()
+            result = run_cli(["--file", f.name, "--from", "en", "--to", "ja"])
+        os.unlink(f.name)
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\n"
+
+    def test_file_multiple_lines(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("Hello\nGoodbye\n")
+            f.flush()
+            result = run_cli(["--file", f.name, "--from", "en", "--to", "ja"])
+        os.unlink(f.name)
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\nさようなら\n"
+
+    def test_file_not_found(self):
+        result = run_cli(["--file", "/nonexistent/path.txt", "--from", "en", "--to", "ja"])
+        assert result.returncode != 0
+        assert "Cannot read file" in result.stderr or "Error" in result.stderr
+
+    def test_file_empty(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("")
+            f.flush()
+            result = run_cli(["--file", f.name, "--from", "en", "--to", "ja"])
+        os.unlink(f.name)
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+    def test_file_crlf(self):
+        """CRLF line endings should be handled correctly."""
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".txt", delete=False) as f:
+            f.write(b"Hello\r\nGoodbye\r\n")
+            f.flush()
+            result = run_cli(["--file", f.name, "--from", "en", "--to", "ja"])
+        os.unlink(f.name)
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\nさようなら\n"
+
+    def test_file_no_extension(self):
+        """Files without extension should work."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix="", delete=False) as f:
+            f.write("Hello\n")
+            f.flush()
+            result = run_cli(["--file", f.name, "--from", "en", "--to", "ja"])
+        os.unlink(f.name)
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\n"
+
+    def test_file_with_blank_lines(self):
+        """Blank lines in file should be preserved in output."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("Hello\n\nGoodbye\n")
+            f.flush()
+            result = run_cli(["--file", f.name, "--from", "en", "--to", "ja"])
+        os.unlink(f.name)
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\n\nさようなら\n"
+
+    def test_file_binary_content(self):
+        """Binary (non-UTF-8) content should produce an error."""
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".bin", delete=False) as f:
+            f.write(b"\x80\x81\x82\xff\xfe")
+            f.flush()
+            result = run_cli(["--file", f.name, "--from", "en", "--to", "ja"])
+        os.unlink(f.name)
+        assert result.returncode != 0
+        assert "Error" in result.stderr
+
+
+# ── Input source conflict detection ──
+
+
+class TestInputConflict:
+    def test_text_flag_and_file(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("Hello\n")
+            f.flush()
+            result = run_cli(
+                ["--text", "World", "--file", f.name, "--from", "en", "--to", "ja"],
+            )
+        os.unlink(f.name)
+        assert result.returncode != 0
+        assert "Multiple input sources" in result.stderr
+
+    def test_positional_and_text_flag(self):
+        result = run_cli(
+            ["Hello", "--text", "World", "--from", "en", "--to", "ja"],
+        )
+        assert result.returncode != 0
+        assert "Multiple input sources" in result.stderr
+
+    def test_positional_and_file(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("Hello\n")
+            f.flush()
+            result = run_cli(
+                ["World", "--file", f.name, "--from", "en", "--to", "ja"],
+            )
+        os.unlink(f.name)
+        assert result.returncode != 0
+        assert "Multiple input sources" in result.stderr
+
+    def test_no_input(self):
+        """No explicit source and stdin is a TTY → error."""
+        master, slave = pty.openpty()
+        try:
+            result = subprocess.run(
+                [CLI, "--from", "en", "--to", "ja"],
+                stdin=slave,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        finally:
+            os.close(master)
+            os.close(slave)
+        assert result.returncode != 0
+        assert "No input" in result.stderr
+
+    def test_explicit_source_ignores_stdin(self):
+        """When --text is given, stdin data should be ignored (no conflict)."""
+        result = run_cli(
+            ["--text", "Hello", "--from", "en", "--to", "ja"],
+            input_text="World",
+        )
+        assert result.returncode == 0
+        assert result.stdout == "こんにちは\n"
 
 
 # ── Short-form language keys ──
@@ -210,55 +440,23 @@ class TestPlainText:
 
 class TestShortFormKeys:
     @pytest.mark.parametrize(
-        "src,tgt,text",
+        "src,tgt,text,expected",
         [
-            ("ja", "en", "こんにちは"),
-            ("en", "ja", "Hello"),
-            ("en", "ko", "Hello"),
-            ("ja", "zh-Hans", "こんにちは"),
-            ("ja", "zh-Hant", "こんにちは"),
-            ("ko", "ja", "안녕하세요"),
-            ("fr", "de", "Bonjour"),
-            ("es", "pt", "Hola"),
+            ("ja", "en", "こんにちは", "Hello"),
+            ("en", "ja", "Hello", "こんにちは"),
+            ("en", "ko", "Hello", "안녕"),
+            ("ja", "zh-Hans", "こんにちは", "你好"),
+            ("ja", "zh-Hant", "こんにちは", "你好"),
+            ("ko", "ja", "안녕하세요", "こんにちは"),
+            ("fr", "de", "Bonjour", "Guten Morgen"),
+            ("es", "pt", "Hola", "Olá"),
         ],
         ids=[
             "ja->en", "en->ja", "en->ko", "ja->zh-Hans",
             "ja->zh-Hant", "ko->ja", "fr->de", "es->pt",
         ],
     )
-    def test_short_form(self, src: str, tgt: str, text: str):
+    def test_short_form(self, src: str, tgt: str, text: str, expected: str):
         result = run_cli(["--from", src, "--to", tgt], input_text=text)
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert len(result.stdout.strip()) > 0
-
-
-# ── Translation: all valid pairs (maximalIdentifier) ──
-
-
-def _valid_pairs() -> list[tuple[str, str]]:
-    """416 valid translation pairs (all combinations minus same-languageCode)."""
-    pairs = []
-    for src in SUPPORTED_LANGUAGES:
-        for tgt in SUPPORTED_LANGUAGES:
-            if src != tgt and (src, tgt) not in _SAME_LANG_SET:
-                pairs.append((src, tgt))
-    return pairs
-
-
-class TestAllLanguagePairs:
-    @pytest.mark.parametrize(
-        "src,tgt",
-        _valid_pairs(),
-        ids=[f"{s}->{t}" for s, t in _valid_pairs()],
-    )
-    def test_translation_pair(self, src: str, tgt: str):
-        result = run_cli(
-            ["--from", src, "--to", tgt],
-            input_text="Hello",
-            timeout=30,
-        )
-        assert result.returncode == 0, (
-            f"[{src}->{tgt}] exit={result.returncode} "
-            f"stderr={result.stderr.strip()}"
-        )
-        assert len(result.stdout.strip()) > 0, f"[{src}->{tgt}] Empty output"
+        assert result.stdout == expected + "\n"

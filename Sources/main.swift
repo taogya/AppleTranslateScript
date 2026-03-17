@@ -2,7 +2,9 @@
 ///
 /// 使い方:
 ///   echo "Hello" | apple-translate --from en --to ja
-///   echo "こんにちは" | apple-translate --from ja-Jpan-JP --to en-Latn-US
+///   apple-translate 'Hello, world!' --from en --to ja
+///   apple-translate --text 'Hello' --from en --to ja
+///   apple-translate --file input.txt --from en --to ja
 ///   apple-translate --list-languages
 
 import Foundation
@@ -25,7 +27,7 @@ struct AppleTranslateCLI {
 
         // --version
         if args.contains("--version") || args.contains("-v") {
-            print("apple-translate 1.0.1")
+            print("apple-translate 1.1.0")
             return
         }
 
@@ -45,9 +47,20 @@ struct AppleTranslateCLI {
             _exit(1)
         }
 
-        // TTY（パイプなし）の場合はエラー
-        if isatty(STDIN_FILENO) != 0 {
-            FileHandle.standardError.write(Data("Error: No input. Pipe text via stdin.\n".utf8))
+        // 入力ソースの決定（複数の明示的ソースはエラー）
+        let textFromFlag = flagValue(args: args, flag: "--text")
+        let fileFromFlag = flagValue(args: args, flag: "--file")
+        let positionalText = extractPositionalText(args: args)
+
+        var explicitSourceCount = 0
+        if textFromFlag != nil { explicitSourceCount += 1 }
+        if fileFromFlag != nil { explicitSourceCount += 1 }
+        if positionalText != nil { explicitSourceCount += 1 }
+
+        if explicitSourceCount > 1 {
+            FileHandle.standardError.write(
+                Data("Error: Multiple input sources specified. Use only one of: positional text, --text, or --file.\n".utf8)
+            )
             _exit(1)
         }
 
@@ -62,17 +75,49 @@ struct AppleTranslateCLI {
             _exit(1)
         }
 
-        // stdin から全行読み取り
+        // 入力テキストの取得
+        var inputLines: [String]
+
+        if let text = textFromFlag {
+            inputLines = [text]
+        } else if let text = positionalText {
+            inputLines = [text]
+        } else if let filePath = fileFromFlag {
+            do {
+                let content = try String(contentsOfFile: filePath, encoding: .utf8)
+                let normalized = content.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+                inputLines = normalized.components(separatedBy: "\n")
+                if inputLines.last?.isEmpty == true { inputLines.removeLast() }
+            } catch {
+                FileHandle.standardError.write(
+                    Data("Error: Cannot read file '\(filePath)': \(error.localizedDescription)\n".utf8)
+                )
+                _exit(1)
+            }
+        } else {
+            // stdin（明示的ソースがない場合のフォールバック）
+            if isatty(STDIN_FILENO) != 0 {
+                FileHandle.standardError.write(Data("Error: No input. Provide text as argument, --text, --file, or pipe via stdin.\n".utf8))
+                _exit(1)
+            }
+            let data = FileHandle.standardInput.readDataToEndOfFile()
+            let content = String(data: data, encoding: .utf8) ?? ""
+            let normalized = content.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+            inputLines = normalized.components(separatedBy: "\n")
+            if inputLines.last?.isEmpty == true { inputLines.removeLast() }
+        }
+
+        // リクエスト作成（空行は翻訳せず位置を保持）
         var requests: [(index: Int, text: String)] = []
-        var lineIndex = 0
-        while let line = readLine(strippingNewline: true) {
+        for (i, line) in inputLines.enumerated() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty { continue }
-            requests.append((index: lineIndex, text: trimmed))
-            lineIndex += 1
+            if !trimmed.isEmpty {
+                requests.append((index: i, text: trimmed))
+            }
         }
 
         if requests.isEmpty {
+            for line in inputLines { print(line) }
             exit(0)
         }
 
@@ -126,11 +171,20 @@ struct AppleTranslateCLI {
             }
         }
 
-        // index 順にソートして出力
+        // index 順にソートして出力（空行を元の位置に復元）
         results.sort { $0.index < $1.index }
 
+        var resultMap: [Int: String] = [:]
         for r in results {
-            print(r.translated)
+            resultMap[r.index] = r.translated
+        }
+
+        for i in 0..<inputLines.count {
+            if let translated = resultMap[i] {
+                print(translated)
+            } else {
+                print(inputLines[i])
+            }
         }
     }
 
@@ -160,11 +214,18 @@ struct AppleTranslateCLI {
 
     static func printUsage() {
         let usage = """
-        Usage: echo <text> | apple-translate --from <LANG> --to <LANG>
+        Usage: apple-translate [TEXT] --from <LANG> --to <LANG>
+               echo <text> | apple-translate --from <LANG> --to <LANG>
 
         A CLI translation tool powered by Apple Translation API.
-        Reads text from stdin and writes translated text to stdout.
+        Translates text from argument, file, or stdin.
         All translations are performed on-device.
+
+        Input (use only one):
+          TEXT                 Positional text argument
+          --text <TEXT>        Text to translate
+          --file <PATH>        Read text from file (one translation per line)
+          <stdin>              Pipe text via stdin
 
         Options:
           --from <LANG>        Source language code (required)
@@ -178,9 +239,10 @@ struct AppleTranslateCLI {
           are accepted. Use --list-languages to see available languages.
 
         Examples:
+          apple-translate 'Hello, world!' --from en --to ja
+          apple-translate --text 'Hello, world!' --from en --to ja
+          apple-translate --file input.txt --from en --to ja
           echo 'Hello, world!' | apple-translate --from en --to ja
-          echo "こんにちは" | apple-translate --from ja --to en
-          echo "Hello" | apple-translate --from en-Latn-US --to ja-Jpan-JP
           apple-translate --list-languages
         """
         print(usage)
@@ -192,4 +254,29 @@ struct AppleTranslateCLI {
         }
         return args[idx + 1]
     }
+
+    /// 位置引数からテキストを抽出する。
+    /// フラグ（--xxx）およびそのパラメータを除いた残りの引数を位置引数とみなす。
+    static func extractPositionalText(args: [String]) -> String? {
+        let flagsWithValue: Set<String> = ["--from", "--to", "--text", "--file"]
+        let standaloneFlags: Set<String> = ["--help", "-h", "--version", "-v", "--list-languages", "-l"]
+
+        var positional: [String] = []
+        var i = 1 // args[0] はバイナリパス
+        while i < args.count {
+            let arg = args[i]
+            if flagsWithValue.contains(arg) {
+                i += 2 // フラグ + 値をスキップ
+            } else if standaloneFlags.contains(arg) {
+                i += 1
+            } else if arg.hasPrefix("-") {
+                i += 1 // 不明なフラグはスキップ
+            } else {
+                positional.append(arg)
+                i += 1
+            }
+        }
+        return positional.isEmpty ? nil : positional.joined(separator: " ")
+    }
+
 }

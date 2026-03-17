@@ -1,8 +1,8 @@
 class AppleTranslate < Formula
   desc "CLI translation tool powered by Apple Translation API"
   homepage "https://github.com/taogya/AppleTranslateScript"
-  url "https://github.com/taogya/AppleTranslateScript/archive/refs/tags/v1.0.1.tar.gz"
-  sha256 "1c325d97e8f97d04b459316d3e8d3b50af5f316e9478bdfda5d33e76491848ce"
+  url "https://github.com/taogya/AppleTranslateScript/archive/refs/tags/v1.1.0.tar.gz"
+  sha256 "TO_BE_UPDATED_AFTER_RELEASE"
   license "BSD-3-Clause"
 
   depends_on xcode: ["26.0", :build]

@@ -13,6 +13,12 @@ brew tap taogya/AppleTranslateScript https://github.com/taogya/AppleTranslateScr
 brew install apple-translate
 ```
 
+アップデート / Update:
+
+```bash
+brew update && brew upgrade apple-translate
+```
+
 ### ソースからビルド / Build from Source
 
 ```bash
@@ -35,6 +41,7 @@ cp .build/release/apple-translate /usr/local/bin/
 ### プレーンテキスト翻訳 / Plain Text Translation
 
 ```bash
+# stdin（パイプ）
 echo 'Hello, world!' | apple-translate --from en --to ja
 # => こんにちは、世界！
 
@@ -42,15 +49,38 @@ echo "こんにちは" | apple-translate --from ja --to en
 # => Hello
 ```
 
+### 引数テキスト翻訳 / Argument Text Translation
+
+```bash
+# 位置引数
+apple-translate 'Hello, world!' --from en --to ja
+# => こんにちは、世界！
+
+# --text フラグ
+apple-translate --text 'Hello, world!' --from en --to ja
+```
+
+### ファイル入力 / File Input
+
+```bash
+apple-translate --file input.txt --from en --to ja
+```
+
+各行が個別に翻訳され、結果が stdout に出力されます。
+Each line is translated individually and output to stdout.
+
+> **注意 / Note:** 入力ソース（位置引数、`--text`、`--file`、stdin）は1つだけ指定してください。複数指定するとエラーになります。
+> Only one input source (positional text, `--text`, `--file`, stdin) can be used at a time.
+
 短縮形・フル形どちらの言語コードも使えます。
 Both short and full language codes are accepted.
 
 ```bash
 # 短縮形 / Short form
-echo "Hello" | apple-translate --from en --to ja
+apple-translate 'Hello' --from en --to ja
 
 # フル形 / Full form (maximalIdentifier)
-echo "Hello" | apple-translate --from en-Latn-US --to ja-Jpan-JP
+apple-translate 'Hello' --from en-Latn-US --to ja-Jpan-JP
 ```
 
 ### 利用可能な言語一覧 / List Available Languages
@@ -62,6 +92,9 @@ apple-translate --list-languages
 ### オプション一覧 / Options
 
 ```
+TEXT                 翻訳テキスト（位置引数） / Text to translate (positional argument)
+--text <TEXT>        翻訳テキスト / Text to translate
+--file <PATH>        ファイルからテキストを読み込み / Read text from file
 --from <LANG>        翻訳元の言語コード（必須） / Source language (required)
 --to <LANG>          翻訳先の言語コード（必須） / Target language (required)
 --list-languages, -l 利用可能な言語の一覧を表示 / List available languages
